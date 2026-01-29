@@ -1,0 +1,12 @@
+binance_profile/
+trendpulse.db
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.sqlite
+*.sqlite3
+ms-playwright/
+playwright-report/
+node_modules/

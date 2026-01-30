@@ -306,13 +306,9 @@ class TrendPulseBot:
             user_ids = self.db.get_all_users()
             if not user_ids:
                 return
-            threshold = self.whale_threshold_usd
             for symbol in symbols:
                 whale_data = self.engine.whale.scan_whale_activity(symbol)
                 if not whale_data.get('has_activity'):
-                    continue
-                flow = abs(whale_data.get('net_flow', 0))
-                if flow < threshold:
                     continue
                 msg = f"""
 🚨 **鲸鱼异动警报** 🚨
@@ -376,7 +372,7 @@ class TrendPulseBot:
 
         # Format Whale Data
         whale_info = ""
-        if 'whale_data' in signal and signal['whale_data']['has_activity'] and abs(signal['whale_data'].get('net_flow', 0)) >= self.whale_threshold_usd:
+        if 'whale_data' in signal and signal['whale_data']['has_activity']:
             wd = signal['whale_data']
             whale_info = f"""
 🐋 **链上聪明钱:**

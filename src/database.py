@@ -170,23 +170,7 @@ class Database:
         cursor = conn.cursor()
         try:
             try:
-                if "鲸鱼异动" in text:
-                    amt_usd = None
-                    # Match like $734.5k or $12.3M
-                    m = re.search(r"\$\s*([0-9][0-9,\.]*)\s*([kKmM])", text)
-                    if m:
-                        num = m.group(1).replace(",", "").strip()
-                        unit = m.group(2)
-                        try:
-                            base = float(num)
-                            if unit.lower() == 'k':
-                                amt_usd = base * 1000.0
-                            elif unit.lower() == 'm':
-                                amt_usd = base * 1000000.0
-                        except Exception:
-                            amt_usd = None
-                    if amt_usd is not None and amt_usd < Config.WHALE_THRESHOLD_USD:
-                        return None
+                pass
             except Exception:
                 pass
             cursor.execute("""

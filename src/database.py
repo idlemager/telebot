@@ -69,6 +69,38 @@ class Database:
         conn.commit()
         conn.close()
         logger.info("Database initialized.")
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS onchain_positions (
+                    token_address TEXT PRIMARY KEY,
+                    amount_wei INTEGER DEFAULT 0,
+                    decimals INTEGER DEFAULT 18,
+                    total_cost_usdt REAL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS onchain_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_address TEXT,
+                    side TEXT,
+                    amount_wei INTEGER,
+                    usdt_value REAL,
+                    tx_hash TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def add_user(self, user_id, plan_type='free'):
         conn = self.get_connection()
@@ -78,6 +110,52 @@ class Database:
             conn.commit()
         except Exception as e:
             logger.error(f"Error adding user: {e}")
+        finally:
+            conn.close()
+    
+    def record_onchain_buy(self, token_address, received_wei, decimals, cost_usdt, tx_hash=None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT amount_wei, total_cost_usdt, decimals FROM onchain_positions WHERE token_address = ?", (token_address,))
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute("INSERT INTO onchain_positions (token_address, amount_wei, decimals, total_cost_usdt, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)", (token_address, int(received_wei), int(decimals), float(cost_usdt)))
+            else:
+                amt, total_cost, dec = row
+                new_amt = int(amt or 0) + int(received_wei)
+                new_cost = float(total_cost or 0.0) + float(cost_usdt)
+                cursor.execute("UPDATE onchain_positions SET amount_wei = ?, total_cost_usdt = ?, decimals = ?, updated_at = CURRENT_TIMESTAMP WHERE token_address = ?", (new_amt, new_cost, int(decimals), token_address))
+            cursor.execute("INSERT INTO onchain_trades (token_address, side, amount_wei, usdt_value, tx_hash) VALUES (?, 'buy', ?, ?, ?)", (token_address, int(received_wei), float(cost_usdt), tx_hash or ''))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error record_onchain_buy: {e}")
+        finally:
+            conn.close()
+    
+    def record_onchain_sell(self, token_address, sold_wei, received_usdt, tx_hash=None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT amount_wei, total_cost_usdt FROM onchain_positions WHERE token_address = ?", (token_address,))
+            row = cursor.fetchone()
+            if row is None:
+                return 0.0
+            amt, total_cost = row
+            amt = int(amt or 0)
+            total_cost = float(total_cost or 0.0)
+            frac = (float(sold_wei) / float(amt)) if amt > 0 else 0.0
+            proportional_cost = total_cost * frac
+            new_amt = max(0, amt - int(sold_wei))
+            new_cost = max(0.0, total_cost - proportional_cost)
+            cursor.execute("UPDATE onchain_positions SET amount_wei = ?, total_cost_usdt = ?, updated_at = CURRENT_TIMESTAMP WHERE token_address = ?", (new_amt, new_cost, token_address))
+            cursor.execute("INSERT INTO onchain_trades (token_address, side, amount_wei, usdt_value, tx_hash) VALUES (?, 'sell', ?, ?, ?)", (token_address, int(sold_wei), float(received_usdt), tx_hash or ''))
+            conn.commit()
+            realized_pnl = float(received_usdt) - proportional_cost
+            return realized_pnl
+        except Exception as e:
+            logger.error(f"Error record_onchain_sell: {e}")
+            return 0.0
         finally:
             conn.close()
 
@@ -190,6 +268,19 @@ class Database:
             return cursor.lastrowid
         except Exception as e:
             logger.error(f"Error adding square post: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    def add_square_ad_post(self, text):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO square_queue (text, status) VALUES (?, 'pending')", (text,))
+            conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Error adding square ad post: {e}")
             return None
         finally:
             conn.close()

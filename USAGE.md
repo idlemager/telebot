@@ -17,7 +17,15 @@ pip install -r requirements.txt
    ```
    (You can get a token from @BotFather on Telegram)
 
-3. (Optional) Set Binance API keys if you want real trading data (otherwise it runs in Mock Mode):
+3. (Optional) Set AI Analysis (OpenAI Compatible API):
+   ```
+   AI_ANALYSIS_ENABLED=true
+   AI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxx
+   AI_BASE_URL=https://api.openai.com/v1 (Optional, for custom endpoints)
+   AI_MODEL=gpt-3.5-turbo (Optional)
+   ```
+
+4. (Optional) Set Binance API keys if you want real trading data (otherwise it runs in Mock Mode):
    ```
    BINANCE_API_KEY=your_key
    BINANCE_API_SECRET=your_secret

@@ -9,6 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 import re
 from .config import Config
+from .ai_analyzer import AIAnalyzer
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 class NewsScanner:
     def __init__(self):
         self.narratives = ['AI', 'Meme', 'L2', 'DeFi', 'GameFi', 'RWA']
+        self.ai_analyzer = AIAnalyzer()
         self.rss_sources = {
             'BlockBeats': "https://api.theblockbeats.news/v2/rss/newsflash",
             'PANews': "https://www.panewslab.com/zh/rss/newsflash.xml",
@@ -25,6 +27,22 @@ class NewsScanner:
                 "https://rsshub.app/binance/announcement",
                 "https://rsshub.rssforever.com/binance/announcement/zh-CN",
                 "https://rsshub.rssforever.com/binance/announcement"
+            ],
+            'OKX公告': [
+                "https://rsshub.app/okx/announcement/zh-CN",
+                "https://rsshub.rssforever.com/okx/announcement/zh-CN"
+            ],
+            'HTX公告': [
+                "https://rsshub.app/huobi/announcement/zh-CN",
+                "https://rsshub.rssforever.com/huobi/announcement/zh-CN"
+            ],
+            'Coinbase': [
+                "https://rsshub.app/coinbase/blog", 
+                "https://rsshub.rssforever.com/coinbase/blog"
+            ],
+            'Gate公告': [
+                "https://rsshub.app/gate/announcement/zh-CN",
+                "https://rsshub.rssforever.com/gate/announcement/zh-CN"
             ]
         }
         self.twitter_real_mode = Config.TWITTER_REAL_MODE
@@ -206,6 +224,29 @@ class NewsScanner:
                         all_new_articles.extend(new_tweets)
             except Exception as e:
                 logger.error(f"Error fetching Twitter RSS: {e}")
+        
+        # AI Analysis and Filtering
+        if self.ai_analyzer.enabled:
+            filtered_articles = []
+            logger.info(f"Analyzing {len(all_new_articles)} new articles with AI...")
+            for article in all_new_articles:
+                try:
+                    # Skip analysis for tweets if needed, but let's analyze everything for now
+                    analysis = self.ai_analyzer.analyze_news(article['title'], article['summary'])
+                    article['ai_analysis'] = analysis
+                    
+                    # Filter logic: Keep High Impact OR Listing/Delisting OR High Score
+                    if (analysis['impact'] == 'High' or 
+                        analysis['type'] in ['Listing', 'Delisting'] or 
+                        analysis.get('score', 0) >= 80):
+                        filtered_articles.append(article)
+                    else:
+                        logger.info(f"Filtered out low impact news: {article['title']} (Impact: {analysis['impact']}, Type: {analysis['type']})")
+                except Exception as e:
+                    logger.error(f"Error during AI analysis for {article['title']}: {e}")
+                    # Keep raw article if analysis fails to avoid missing potential alpha due to errors
+                    filtered_articles.append(article)
+            return filtered_articles
                 
         return all_new_articles
 
@@ -356,3 +397,24 @@ class NewsScanner:
             seen.add(k)
             dedup.append(it)
         return dedup
+
+    def scan_binance_alpha_listings(self, limit=10):
+        items = []
+        try:
+            page_items = self._fetch_binance_announcements_page(limit=50)
+            keys = ["上线", "上架", "开通交易", "开启交易", "将上线", "上线币安", "新增交易对", "上线现货", "上线合约"]
+            for a in page_items:
+                t = f"{a.get('title','')} {a.get('summary','')}"
+                tx = t.replace("\u3000", " ")
+                ok = False
+                for k in keys:
+                    if k in tx:
+                        ok = True
+                        break
+                if ok:
+                    items.append(a)
+                    if len(items) >= limit:
+                        break
+        except Exception:
+            return []
+        return items

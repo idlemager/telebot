@@ -4,8 +4,13 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from .config import Config
 from .engines import SignalEngine
 from .database import Database
+from .trading import TradingEngine
+from .onchain import OnChainTradingEngine
+from .missions import BinanceMissions
+from .polymarket_watcher import PolymarketWatcher
 import os
 import time
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +20,9 @@ class TrendPulseBot:
         self.engine = SignalEngine()
         self.db = Database()
         self.whale_threshold_usd = Config.WHALE_THRESHOLD_USD
+        self.trader = TradingEngine()
+        self.onchain = OnChainTradingEngine()
+        self.polymarket = PolymarketWatcher()
     
     def _is_group(self, update: Update):
         return update.effective_chat and update.effective_chat.type in ('group', 'supergroup')
@@ -34,12 +42,22 @@ class TrendPulseBot:
         # Schedule whale alerts check every 2 minutes
         job_queue.run_repeating(self.check_whale_alerts, interval=120, first=20)
         job_queue.run_repeating(self.housekeeping_cleanup, interval=21600, first=120)
+        job_queue.run_repeating(self.post_advertisement, interval=Config.AD_INTERVAL_SECONDS, first=10)
+        job_queue.run_repeating(self.check_funding_rates, interval=180, first=30)
+        job_queue.run_repeating(self.check_binance_alpha, interval=300, first=40)
+        job_queue.run_repeating(self.check_large_transfers, interval=180, first=50)
+        job_queue.run_repeating(self.auto_trade_opportunities, interval=120, first=60)
+        job_queue.run_repeating(self.auto_trade_onchain, interval=180, first=75)
+        job_queue.run_repeating(self.monitor_onchain_positions, interval=240, first=120)
+        job_queue.run_repeating(self.auto_run_missions, interval=600, first=180)
+        job_queue.run_repeating(self.check_polymarket, interval=300, first=15)
 
         start_handler = CommandHandler('start', self.start)
         scan_handler = CommandHandler('scan', self.scan_social)
         analyze_handler = CommandHandler(['trend', 'risk'], self.analyze)
         stats_handler = CommandHandler('stats', self.stats)
         help_handler = CommandHandler('help', self.help)
+        alpha_handler = CommandHandler('alpha', self.alpha)
         
         application.add_handler(start_handler)
         application.add_handler(scan_handler)
@@ -47,6 +65,9 @@ class TrendPulseBot:
         application.add_handler(stats_handler)
         application.add_handler(help_handler)
         application.add_handler(CommandHandler('test_push', self.test_push))
+        application.add_handler(alpha_handler)
+        application.add_handler(CommandHandler('buytoken', self.buy_token))
+        application.add_handler(CommandHandler('selltoken', self.sell_token))
         
         logger.info("Bot started...")
         print("Bot is running...")
@@ -82,13 +103,25 @@ class TrendPulseBot:
                 }
                 source_emoji = source_emojis.get(article.get('source'), "🗞️")
                 
+                # AI Analysis Section
+                ai_section = ""
+                if 'ai_analysis' in article and article['ai_analysis']:
+                    analysis = article['ai_analysis']
+                    impact_emoji = "🔥" if analysis['impact'] == 'High' else "⚡" if analysis['impact'] == 'Medium' else "ℹ️"
+                    type_emoji = "🚀" if analysis['type'] == 'Listing' else "❌" if analysis['type'] == 'Delisting' else "📝"
+                    
+                    ai_section = f"\n\n🤖 **AI 智能分析**\n" \
+                                 f"影响力: {impact_emoji} {analysis['impact']}\n" \
+                                 f"类型: {type_emoji} {analysis['type']}\n" \
+                                 f"摘要: {analysis['summary']}\n"
+
                 msg = f"""
 {source_emoji} **{article.get('source', 'News')} 快讯**
 
 **{article['title']}**
 
 {article['summary'][:200]}...
-
+{ai_section}
 🔗 [查看原文]({article['link']})
                 """
                 square_msg = article.get('summary') or f"{article['title']}"
@@ -298,6 +331,36 @@ class TrendPulseBot:
             logger.error(f"Error in scan_social: {e}")
             await context.bot.send_message(chat_id=update.effective_chat.id, text="扫描社交信息时发生错误。")
 
+    async def check_polymarket(self, context: ContextTypes.DEFAULT_TYPE):
+        """Background task to check for Polymarket alerts"""
+        try:
+            alerts = self.polymarket.check_market_movements()
+            if not alerts:
+                return
+            
+            user_ids = self.db.get_all_users()
+            if not user_ids:
+                return
+                
+            for alert in alerts:
+                price_pct = alert['price'] * 100
+                msg = f"""
+🔮 **Polymarket 预测警报**
+
+**事件:** {alert['event_title']}
+**问题:** {alert['question']}
+**结果:** {alert['outcome']} 概率突升至 **{price_pct:.1f}%** 🔥
+
+🔗 [查看预测市场]({alert['link']})
+"""
+                for user_id in user_ids:
+                    try:
+                        await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"Error in check_polymarket: {e}")
+
     async def check_whale_alerts(self, context: ContextTypes.DEFAULT_TYPE):
         try:
             symbols = self.engine.market.list_usdt_pairs(limit=100)
@@ -337,6 +400,318 @@ class TrendPulseBot:
                         pass
         except Exception as e:
             logger.error(f"Error in check_whale_alerts: {e}")
+    
+    async def check_funding_rates(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            syms = [s.strip() for s in Config.FUNDING_SYMBOLS.split(",") if s.strip()]
+            if not syms:
+                syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+            user_ids = self.db.get_all_users()
+            if not user_ids:
+                return
+            for s in syms:
+                rate = self.engine.market.fetch_current_funding_rate(s)
+                if rate is None:
+                    continue
+                if abs(rate) < Config.FUNDING_RATE_THRESHOLD:
+                    continue
+                pct = rate * 100
+                side = "正" if rate >= 0 else "负"
+                msg = f"""
+⚠️ **资金费率异常**
+━━━━━━━━━━━━━━
+**合约:** {s}
+**费率:** {pct:.4f}%
+**方向:** {side}
+
+💡 *资金费率突破阈值，注意强平与挤兑风险*
+━━━━━━━━━━━━━━
+                """
+                square_msg = f"资金费率异常 {s} | {pct:.4f}%"
+                post_id = self.db.add_square_post(square_msg)
+                for user_id in user_ids:
+                    try:
+                        chat = await context.bot.get_chat(user_id)
+                        if chat.type in ('group', 'supergroup'):
+                            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
+                    except Exception as e:
+                        logger.error(f"Failed to send funding alert to {user_id}: {e}")
+                if post_id is not None:
+                    try:
+                        self.db.mark_square_post_approved(post_id)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"Error in check_funding_rates: {e}")
+    
+    async def check_binance_alpha(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if not Config.ALPHA_MONITOR_ENABLED:
+                return
+            items = self.engine.news.scan_binance_alpha_listings(limit=8)
+            if not items:
+                return
+            user_ids = self.db.get_all_users()
+            if not user_ids:
+                return
+            for a in items:
+                msg = f"""
+🏦 **币安新币监控**
+━━━━━━━━━━━━━━
+{a.get('title','')}
+
+🔗 {a.get('link','')}
+━━━━━━━━━━━━━━
+                """
+                square_msg = f"币安新币 {a.get('title','')}"
+                post_id = self.db.add_square_post(square_msg)
+                for user_id in user_ids:
+                    try:
+                        chat = await context.bot.get_chat(user_id)
+                        if chat.type in ('group', 'supergroup'):
+                            await context.bot.send_message(chat_id=user_id, text=msg)
+                    except Exception as e:
+                        logger.error(f"Failed to send alpha alert to {user_id}: {e}")
+                if post_id is not None:
+                    try:
+                        self.db.mark_square_post_approved(post_id)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"Error in check_binance_alpha: {e}")
+    
+    async def check_large_transfers(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            events = self.engine.whale.scan_large_transfers()
+            if not events:
+                return
+            user_ids = self.db.get_all_users()
+            if not user_ids:
+                return
+            for e in events:
+                amt = e.get('amount_usd') or 0
+                side = e.get('direction') or ''
+                msg = f"""
+💸 **大额转账监控**
+━━━━━━━━━━━━━━
+{e.get('title','')}
+
+金额约 ${amt:,.0f} USD
+方向 {side}
+来源 {e.get('source','')}
+🔗 {e.get('link','')}
+━━━━━━━━━━━━━━
+                """
+                square_msg = f"大额转账 | {e.get('title','')} | ${amt:,.0f}"
+                post_id = self.db.add_square_post(square_msg)
+                for user_id in user_ids:
+                    try:
+                        chat = await context.bot.get_chat(user_id)
+                        if chat.type in ('group', 'supergroup'):
+                            await context.bot.send_message(chat_id=user_id, text=msg)
+                    except Exception as ex:
+                        logger.error(f"Failed to send transfer alert to {user_id}: {ex}")
+                if post_id is not None:
+                    try:
+                        self.db.mark_square_post_approved(post_id)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"Error in check_large_transfers: {e}")
+    
+    async def alpha(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_group(update):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="该机器人仅在群组中可用。请在群聊中使用。")
+            return
+        try:
+            opps = self.engine.generate_opportunities()
+            if not opps:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="当前暂无高置信度机会。")
+                return
+            lines = ["🚀 **实时机会清单**", ""]
+            for o in opps[:8]:
+                t = o.get('type')
+                if t == 'funding_rate_extreme':
+                    pct = o.get('rate', 0) * 100
+                    lines.append(f"• 资金费率 | {o.get('symbol')} | {pct:.4f}% | 建议方向: {o.get('side')}")
+                elif t == 'binance_alpha_listing':
+                    lines.append(f"• 新币 | {o.get('title','')} | 链接 {o.get('link','')}")
+                elif t == 'large_transfer':
+                    amt = o.get('amount_usd') or 0
+                    lines.append(f"• 大额转账 | {o.get('direction','')} | ${amt:,.0f} | 链接 {o.get('link','')}")
+            text = "\n".join(lines)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Error in alpha command: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="生成机会清单时发生错误。")
+    
+    async def auto_trade_opportunities(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if not self.trader.enabled:
+                return
+            syms = [s.strip() for s in getattr(Config, "TRADE_SYMBOLS", "").split(",") if s.strip()]
+            if not syms:
+                return
+            for s in syms:
+                sig = self.engine.analyze_symbol(s)
+                if not sig:
+                    continue
+                o = self.trader.act_on_signal(s, sig)
+                if o:
+                    square_msg = f"AutoTrade {s} | {o.get('id','')} | {o.get('side','')}"
+                    post_id = self.db.add_square_post(square_msg)
+                    if post_id is not None:
+                        try:
+                            self.db.mark_square_post_approved(post_id)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error(f"Error in auto_trade_opportunities: {e}")
+    
+    async def auto_trade_onchain(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if not self.onchain.enabled:
+                return
+            opps = self.engine.generate_opportunities()
+            if not opps:
+                return
+            wl = self.onchain.whitelist
+            if not wl:
+                return
+            for o in opps:
+                if o.get('type') == 'large_transfer' and o.get('direction') == 'inflow':
+                    tx = self.onchain.buy_token_usdt(wl[0], min(self.onchain.max_usd, 10))
+                    if tx:
+                        self.db.record_onchain_buy(wl[0], tx.get('received_wei', 0), tx.get('decimals', 18), tx.get('cost_usdt', 0), tx_hash=tx.get('hash',''))
+                        square_msg = f"OnChain Buy | {tx.get('hash','')}"
+                        post_id = self.db.add_square_post(square_msg)
+                        if post_id is not None:
+                            try:
+                                self.db.mark_square_post_approved(post_id)
+                            except Exception:
+                                pass
+                    break
+        except Exception as e:
+            logger.error(f"Error in auto_trade_onchain: {e}")
+    
+    async def buy_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_group(update):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="该机器人仅在群组中可用。请在群聊中使用。")
+            return
+        try:
+            if not self.onchain.enabled:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="未启用链上交易。")
+                return
+            if len(context.args) < 2:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="用法: /buytoken <token_address> <usd>")
+                return
+            addr = context.args[0]
+            usd = float(context.args[1])
+            tx = self.onchain.buy_token_usdt(addr, usd)
+            if tx:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"买入成功: {tx.get('hash','')}")
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="买入失败或未满足白名单/余额。")
+        except Exception as e:
+            logger.error(f"Error in buy_token: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="执行买入出错。")
+    
+    async def sell_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_group(update):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="该机器人仅在群组中可用。请在群聊中使用。")
+            return
+        try:
+            if not self.onchain.enabled:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="未启用链上交易。")
+                return
+            if len(context.args) < 2:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="用法: /selltoken <token_address> <percent>")
+                return
+            addr = context.args[0]
+            pct = float(context.args[1])
+            tx = self.onchain.sell_token_to_usdt(addr, pct)
+            if tx:
+                pnl = self.db.record_onchain_sell(addr, tx.get('sold_wei', 0), tx.get('received_usdt', 0), tx_hash=tx.get('hash',''))
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"卖出成功: {tx.get('hash','')} | 实现盈亏: ${pnl:,.2f}")
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="卖出失败或未满足白名单/余额。")
+        except Exception as e:
+            logger.error(f"Error in sell_token: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="执行卖出出错。")
+    
+    async def monitor_onchain_positions(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if not self.onchain.enabled:
+                return
+            wl = self.onchain.whitelist
+            if not wl:
+                return
+            # naive monitor: check the first token's current USDT value vs cost
+            token = wl[0]
+            # Fetch position
+            conn = self.db.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT amount_wei, total_cost_usdt, decimals FROM onchain_positions WHERE token_address = ?", (token,))
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                return
+            amt_wei, total_cost, dec = row
+            if amt_wei <= 0 or total_cost <= 0:
+                return
+            q = self.onchain._quote_out(int(amt_wei), [token, self.onchain.usdt])
+            if not q or len(q) < 2:
+                return
+            current_usdt = float(q[-1]) / float(10 ** int(self.onchain._get_decimals(self.onchain.usdt)))
+            change_pct = (current_usdt - float(total_cost)) / float(total_cost) * 100.0
+            if change_pct <= -Config.STOP_LOSS_PCT or change_pct >= Config.TAKE_PROFIT_PCT:
+                tx = self.onchain.sell_token_to_usdt(token, 1.0)
+                if tx:
+                    pnl = self.db.record_onchain_sell(token, tx.get('sold_wei', 0), tx.get('received_usdt', 0), tx_hash=tx.get('hash',''))
+                    square_msg = f"OnChain Exit | {tx.get('hash','')} | PnL ${pnl:,.2f}"
+                    post_id = self.db.add_square_post(square_msg)
+                    if post_id is not None:
+                        try:
+                            self.db.mark_square_post_approved(post_id)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error(f"Error in monitor_onchain_positions: {e}")
+    
+    async def auto_run_missions(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if not Config.MISSIONS_ENABLED:
+                return
+            loop = asyncio.get_running_loop()
+            res = await loop.run_in_executor(None, BinanceMissions().run)
+            if res and res.get("ok"):
+                msg = "任务中心已尝试完成可点击任务"
+            else:
+                msg = "任务执行失败或未安装Playwright"
+            post_id = self.db.add_square_post(msg)
+            if post_id is not None:
+                try:
+                    self.db.mark_square_post_approved(post_id)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Error in auto_run_missions: {e}")
+    
+    async def post_advertisement(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            try:
+                load_dotenv(override=True)
+            except Exception:
+                pass
+            enabled = os.getenv("AD_ENABLED", "true").lower() in ("1", "true", "yes")
+            if not enabled:
+                return
+            ad = os.getenv("AD_TEXT", Config.AD_TEXT)
+            post_id = self.db.add_square_ad_post(ad)
+            if post_id is not None:
+                self.db.mark_square_post_approved(post_id)
+        except Exception as e:
+            logger.error(f"Error in post_advertisement: {e}")
 
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_group(update):

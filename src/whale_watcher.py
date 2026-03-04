@@ -225,3 +225,34 @@ class WhaleWatcher:
         except Exception:
             return []
         return articles
+
+    def scan_large_transfers(self, base=None):
+        events = []
+        try:
+            page_entries = self._fetch_panews_newsflash_page()
+            for a in page_entries[:60]:
+                txt = f"{a.get('title','')} {a.get('summary','')}"
+                t = txt.lower()
+                if base:
+                    b = base.upper()
+                    if '/' in b:
+                        b = b.split('/')[0]
+                    if b.endswith('USDT'):
+                        b = b.replace('USDT', '')
+                    if b not in txt.upper():
+                        continue
+                if any(k in t for k in ["转账", "transfer", "划转", "大额", "鲸鱼"]):
+                    amt, sign = self._extract_amount_and_direction(txt)
+                    if amt and amt >= Config.LARGE_TRANSFER_THRESHOLD_USD:
+                        events.append({
+                            'source': a.get('source') or 'PANews',
+                            'title': a.get('title') or '',
+                            'summary': a.get('summary') or '',
+                            'link': a.get('link') or '',
+                            'published': a.get('published') or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            'amount_usd': amt,
+                            'direction': 'inflow' if sign >= 0 else 'outflow'
+                        })
+        except Exception:
+            return []
+        return events[:10]

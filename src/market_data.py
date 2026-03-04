@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import logging
 from .config import Config
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -61,3 +62,22 @@ class MarketDataEngine:
         except Exception as e:
             logger.error(f"Error loading markets: {e}")
             return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'PEPE/USDT', 'WIF/USDT']
+
+    def fetch_current_funding_rate(self, symbol):
+        if not symbol:
+            return None
+        try:
+            base = symbol.upper().replace("/", "")
+            url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={base}"
+            with httpx.Client(timeout=8) as client:
+                r = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                v = data.get("lastFundingRate")
+                if v is None:
+                    return None
+                return float(v)
+        except Exception as e:
+            logger.error(f"Error fetching funding rate for {symbol}: {e}")
+            return None

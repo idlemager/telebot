@@ -86,3 +86,49 @@ class SignalEngine:
                 if sig['heat_score'] > 50 or sig['volume_score'] > 150: # Thresholds
                     signals.append(sig)
         return signals
+
+    def generate_opportunities(self):
+        opps = []
+        try:
+            syms = [s.strip() for s in Config.FUNDING_SYMBOLS.split(",") if s.strip()]
+            for s in syms:
+                r = self.market.fetch_current_funding_rate(s)
+                if r is None:
+                    continue
+                if abs(r) >= Config.FUNDING_RATE_THRESHOLD:
+                    opps.append({
+                        'type': 'funding_rate_extreme',
+                        'symbol': s,
+                        'rate': r,
+                        'side': 'short' if r > 0 else 'long',
+                        'score': min(100, int(abs(r) / Config.FUNDING_RATE_THRESHOLD * 60))
+                    })
+        except Exception:
+            pass
+        try:
+            if getattr(Config, "ALPHA_MONITOR_ENABLED", True):
+                items = self.news.scan_binance_alpha_listings(limit=6)
+                for a in items:
+                    opps.append({
+                        'type': 'binance_alpha_listing',
+                        'title': a.get('title'),
+                        'link': a.get('link'),
+                        'score': 70
+                    })
+        except Exception:
+            pass
+        try:
+            events = self.whale.scan_large_transfers()
+            for e in events:
+                opps.append({
+                    'type': 'large_transfer',
+                    'title': e.get('title'),
+                    'direction': e.get('direction'),
+                    'amount_usd': e.get('amount_usd'),
+                    'link': e.get('link'),
+                    'score': min(100, int((e.get('amount_usd') or 0) / (Config.LARGE_TRANSFER_THRESHOLD_USD or 1) * 50))
+                })
+        except Exception:
+            pass
+        opps.sort(key=lambda x: x.get('score', 0), reverse=True)
+        return opps[:10]

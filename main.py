@@ -52,6 +52,7 @@ try:
         atexit.register(lambda: _lock.close())
         print("Initializing Bot...", flush=True)
         bot = TrendPulseBot()
+        _t = None
         try:
             import src.binance_square as square_worker
             _t = threading.Thread(target=square_worker.main, daemon=True)
@@ -70,5 +71,7 @@ try:
                         time.sleep(5)
                 except KeyboardInterrupt:
                     break
+                except Exception:
+                    time.sleep(2)
 except Exception:
     traceback.print_exc()

@@ -8,6 +8,7 @@ import sqlite3
 import re
 import html
 import sys
+from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import Config
 fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -35,6 +36,8 @@ for h in logging.getLogger().handlers:
 URL = "https://www.binance.com/zh-CN/square"
 PROFILE_URL = "https://www.binance.com/zh-CN/square/profile/square-creator-3c1df46e1b0ed"
 PROFILE_DIR = os.path.join(os.path.dirname(__file__), "..", "binance_profile")
+X_PROFILE_URL = getattr(Config, "X_PROFILE_URL", "https://x.com/idlemage")
+X_COMPOSE_URL = "https://x.com/compose/post"
 logger = logging.getLogger(__name__)
 DB_PATH = Config.DB_PATH
 
@@ -69,7 +72,7 @@ class BinanceSquarePublisher:
                     continue
                 if browser is None:
                     try:
-                        browser = p.chromium.launch_persistent_context(PROFILE_DIR, headless=False)
+                        browser = p.chromium.launch_persistent_context(PROFILE_DIR, headless=Config.PLAYWRIGHT_HEADLESS)
                         page = browser.new_page()
                         page.goto(URL, wait_until="load", timeout=30000)
                         self._ready = True
@@ -151,7 +154,45 @@ class BinanceSquarePublisher:
                 page.keyboard.press("Delete")
             except Exception:
                 pass
-            page.keyboard.type(text, delay=10)
+            try:
+                editor.fill("")
+            except Exception:
+                pass
+            try:
+                editor.evaluate("el => { try { el.innerHTML = ''; } catch(_) {} try { if (typeof el.value !== 'undefined') el.value = ''; } catch(_) {} }")
+            except Exception:
+                pass
+            try:
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+            except Exception:
+                pass
+            try:
+                editor.evaluate("(el, t) => { try { if (el.getAttribute && el.getAttribute('contenteditable')) { el.innerText = t; } else if (typeof el.value !== 'undefined') { el.value = t; } else { el.textContent = t; } } catch(_) {} }", text)
+            except Exception:
+                try:
+                    editor.type(text, delay=10)
+                except Exception:
+                    page.keyboard.type(text, delay=10)
+            try:
+                cur = editor.inner_text().strip()
+            except Exception:
+                cur = ""
+            if not cur:
+                try:
+                    cur = editor.input_value().strip()
+                except Exception:
+                    pass
+            if cur and len(cur) > len(text) * 2 and cur.endswith(text):
+                try:
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Delete")
+                except Exception:
+                    pass
+                try:
+                    editor.evaluate("(el, t) => { try { if (el.getAttribute && el.getAttribute('contenteditable')) { el.innerText = t; } else if (typeof el.value !== 'undefined') { el.value = t; } else { el.textContent = t; } } catch(_) {} }", text)
+                except Exception:
+                    pass
         except Exception:
             return False
         post_btn = find_modal_post_button(ctx)
@@ -174,12 +215,28 @@ class BinanceSquarePublisher:
             ctx.wait_for_timeout(2000)
             toast = ctx.locator("div:has-text('发布成功'), div:has-text('发文成功'), div:has-text('发帖成功'), [role='alert']:has-text('成功'), .bn-notification:has-text('成功')").first
             if toast and toast.count() > 0 and toast.is_visible():
+                try:
+                    for csel in ["button:has-text('关闭')", "[role='button']:has-text('关闭')", "button[aria-label='Close']", "[aria-label='Close']", "button:has-text('取消')", "[role='button']:has-text('取消')"]:
+                        cl = ctx.locator(csel).first
+                        if cl and cl.count() > 0 and cl.is_visible():
+                            cl.click(timeout=2000)
+                            break
+                except Exception:
+                    pass
                 return True
             for _ in range(15):
                 ctx.wait_for_timeout(1200)
                 try:
                     toast = ctx.locator("div:has-text('发布成功'), div:has-text('发文成功'), div:has-text('发帖成功'), [role='alert']:has-text('成功'), .bn-notification:has-text('成功')").first
                     if toast and toast.count() > 0 and toast.is_visible():
+                        try:
+                            for csel in ["button:has-text('关闭')", "[role='button']:has-text('关闭')", "button[aria-label='Close']", "[aria-label='Close']", "button:has-text('取消')", "[role='button']:has-text('取消')"]:
+                                cl = ctx.locator(csel).first
+                                if cl and cl.count() > 0 and cl.is_visible():
+                                    cl.click(timeout=2000)
+                                    break
+                        except Exception:
+                            pass
                         return True
                 except Exception:
                     pass
@@ -190,8 +247,101 @@ class BinanceSquarePublisher:
                 except Exception:
                     pass
         except Exception:
-            return True
+            return False
         return False
+
+def post_to_x(page, text: str):
+    try:
+        page.goto(X_PROFILE_URL, wait_until="load", timeout=30000)
+    except Exception:
+        try:
+            page.goto(X_COMPOSE_URL, wait_until="load", timeout=30000)
+        except Exception:
+            return False
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    editor = None
+    selectors = ["[contenteditable='true']", "[contenteditable=true]", "div[role='textbox']", "textarea"]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc and loc.count() > 0:
+                editor = loc
+                break
+        except Exception:
+            continue
+    if editor is None:
+        try:
+            page.goto(X_COMPOSE_URL, wait_until="load", timeout=30000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc and loc.count() > 0:
+                        editor = loc
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    if editor is None:
+        return False
+    try:
+        editor.scroll_into_view_if_needed()
+        editor.click(timeout=4000)
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+        except Exception:
+            pass
+        page.keyboard.type(text, delay=10)
+    except Exception:
+        return False
+    post_btn = None
+    btn_selectors = [
+        "button:has-text('Post'):not([disabled])",
+        "[role='button']:has-text('Post'):not([disabled])",
+        "button:has-text('Tweet'):not([disabled])",
+        "[role='button']:has-text('Tweet'):not([disabled])",
+        "button:has-text('发帖'):not([disabled])",
+        "[role='button']:has-text('发帖'):not([disabled])",
+        "[data-testid='tweetButtonInline']",
+        "[data-testid='tweetButton']"
+    ]
+    for sel in btn_selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc and loc.count() > 0:
+                post_btn = loc
+                break
+        except Exception:
+            continue
+    if post_btn is None:
+        try:
+            page.keyboard.press("Control+Enter")
+            return True
+        except Exception:
+            return False
+    try:
+        post_btn.scroll_into_view_if_needed()
+        for _ in range(20):
+            try:
+                dis = post_btn.get_attribute("disabled")
+                if dis is None and post_btn.is_enabled():
+                    break
+            except Exception:
+                break
+            page.wait_for_timeout(200)
+        post_btn.click(timeout=5000)
+    except Exception:
+        return False
+    try:
+        page.wait_for_timeout(1200)
+    except Exception:
+        pass
+    return True
 
 def open_post_modal(page):
     modal = None
@@ -338,14 +488,14 @@ def claim_pending(limit=5):
         cur.execute("""
             SELECT id, text, attempts FROM square_queue
             WHERE status = 'pending'
+              AND bot_approved = 1
               AND (next_try_at IS NULL OR next_try_at <= CURRENT_TIMESTAMP)
-            ORDER BY created_at DESC
+            ORDER BY created_at ASC
             LIMIT 1
         """)
         row = cur.fetchone()
         if row:
             pid, text, attempts = row
-            cur.execute("UPDATE square_queue SET status = 'failed' WHERE status = 'pending' AND id <> ?", (pid,))
             cur.execute("UPDATE square_queue SET status = 'processing' WHERE id = ? AND status = 'pending'", (pid,))
             if cur.rowcount and cur.rowcount > 0:
                 claimed.append((pid, text, attempts))
@@ -396,7 +546,7 @@ def already_sent(text):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT 1 FROM square_queue WHERE text = ? AND status = 'sent' AND sent_at IS NOT NULL LIMIT 1", (text,))
+        cur.execute("SELECT 1 FROM square_queue WHERE text = ? AND status = 'sent' AND sent_at IS NOT NULL AND sent_at >= datetime('now','-25 minutes') LIMIT 1", (text,))
         row = cur.fetchone()
         return row is not None
     finally:
@@ -413,25 +563,59 @@ def sanitize_text(text):
             p = p.replace("</p><p>", "\n").replace("<br />", "\n").replace("<br/>", "\n").replace("<br>", "\n")
             p = re.sub(r"<[^>]+>", "", p)
             p = html.unescape(p)
+            p = re.sub(r"(?i)\bokx\b", "", p)
             p = re.sub(r"[ \t]+", " ", p)
             p = p.strip()
             if p:
                 cleaned.append(p)
-        return "\n".join(cleaned)
+        s = "\n".join(cleaned)
+        if len(s) > 1800:
+            s = s[:1800]
+        return s
     t = raw.replace("</p><p>", "\n").replace("<br />", "\n").replace("<br/>", "\n").replace("<br>", "\n")
     t = re.sub(r"<[^>]+>", "", t)
     t = html.unescape(t)
+    t = re.sub(r"(?i)\bokx\b", "", t)
     t = re.sub(r"[ \t]+", " ", t)
     t = t.strip()
+    if len(t) > 1800:
+        t = t[:1800]
     return t
 
 def main():
     ensure_square_queue_schema()
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(PROFILE_DIR, headless=False)
+        browser = p.chromium.launch_persistent_context(PROFILE_DIR, headless=Config.PLAYWRIGHT_HEADLESS)
         page = browser.new_page()
         page.goto(PROFILE_URL, wait_until="load")
+        last_ad_ts = 0
         while True:
+            try:
+                load_dotenv(override=True)
+                ad_text = os.getenv("AD_TEXT")
+                try:
+                    ad_interval = int(os.getenv("AD_INTERVAL_SECONDS", "0") or "0")
+                except Exception:
+                    ad_interval = 0
+                ad_enabled = (os.getenv("AD_ENABLED", "true").lower() in ("1", "true", "yes"))
+                if ad_enabled and ad_text and ad_interval > 0:
+                    now = time.time()
+                    if (now - last_ad_ts) >= int(ad_interval):
+                        try:
+                            conn = sqlite3.connect(DB_PATH)
+                            cur = conn.cursor()
+                            cur.execute("INSERT INTO square_queue (text, status, bot_approved) VALUES (?, 'pending', 1)", (ad_text,))
+                            conn.commit()
+                            last_ad_ts = now
+                        except Exception:
+                            pass
+                        finally:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             posts = claim_pending(limit=1)
             try:
                 logger.info(f"[square] pending-approved batch: {len(posts)}")

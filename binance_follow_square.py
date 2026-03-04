@@ -93,17 +93,24 @@ def sanitize_text(text):
             p = re.sub(r"<[^>]+>", "", p)
             p = html.unescape(p)
             p = re.sub(r"^\s*(BlockBeats\s*快讯[:]?\s*)", "", p, flags=re.IGNORECASE)
+            p = re.sub(r"(?i)\bokx\b", "", p)
             p = re.sub(r"[ \t]+", " ", p)
             p = p.strip()
             if p:
                 cleaned.append(p)
-        return "\n".join(cleaned)
+        s = "\n".join(cleaned)
+        if len(s) > 1800:
+            s = s[:1800]
+        return s
     t = raw.replace("</p><p>", "\n").replace("<br />", "\n").replace("<br/>", "\n").replace("<br>", "\n")
     t = re.sub(r"<[^>]+>", "", t)
     t = html.unescape(t)
     t = re.sub(r"^\s*(BlockBeats\s*快讯[:]?\s*)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?i)\bokx\b", "", t)
     t = re.sub(r"[ \t]+", " ", t)
     t = t.strip()
+    if len(t) > 1800:
+        t = t[:1800]
     return t
 
 def open_post_modal(page):

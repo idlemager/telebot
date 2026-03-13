@@ -90,3 +90,47 @@ class AIAnalyzer:
                 'coins': [],
                 'score': 0
             }
+
+    def generate_post(self, topic, length=200):
+        """
+        Generates a post for Binance Square based on a topic.
+        """
+        if not self.enabled or not self.api_key:
+            return f"Thinking about {topic}... #Crypto #Binance"
+
+        prompt = f"""
+        请为 Binance Square (币安广场) 撰写一篇关于 "{topic}" 的短文。
+        
+        要求：
+        1. 语言：中文。
+        2. 风格：专业、客观、略带幽默。
+        3. 字数：{length} 字左右。
+        4. 包含 2-3 个相关的 hashtag (例如 #BTC #Crypto)。
+        5. 不要包含 "标题"、"正文" 等标记，直接返回内容。
+        """
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful crypto social media assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7
+            }
+            
+            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data, timeout=15)
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result['choices'][0]['message']['content'].strip()
+            return content
+            
+        except Exception as e:
+            logger.error(f"AI post generation failed: {e}")
+            return f"Checking out {topic}! #Crypto"

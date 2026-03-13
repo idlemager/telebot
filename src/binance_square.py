@@ -115,6 +115,25 @@ class BinanceSquarePublisher:
                         self._q.put(text)
                     except Exception:
                         pass
+                
+                # Check if X posting is enabled
+                if ok and Config.X_POST_ENABLED:
+                    try:
+                        logger.info(f"Posting to X: {text[:20]}...")
+                        x_ok = post_to_x(page, text)
+                        if x_ok:
+                            logger.info("Posted to X successfully.")
+                        else:
+                            logger.error("Failed to post to X.")
+                    except Exception as e:
+                        logger.error(f"Error posting to X: {e}")
+                    
+                    # Return to Binance Square URL to keep state consistent for next loop
+                    try:
+                        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+
                 time.sleep(1.0)
             try:
                 if browser:
@@ -251,97 +270,106 @@ class BinanceSquarePublisher:
         return False
 
 def post_to_x(page, text: str):
+    logger.info("Attempting to post to X...")
     try:
-        page.goto(X_PROFILE_URL, wait_until="load", timeout=30000)
-    except Exception:
+        # Try compose URL directly
         try:
-            page.goto(X_COMPOSE_URL, wait_until="load", timeout=30000)
+            page.goto(X_COMPOSE_URL, wait_until="domcontentloaded", timeout=20000)
         except Exception:
-            return False
-    try:
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
-    except Exception:
-        pass
+            # Fallback to home
+            page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=20000)
+            
+        page.wait_for_timeout(2000)
+        
+        # Check if we need to login (simplified check)
+        if page.locator("input[name='text']").count() > 0 or page.locator("a[href='/login']").count() > 0:
+            logger.warning("X login required or not logged in properly.")
+            # We assume the profile has cookies. If not, manual login is needed once.
+            
+    except Exception as e:
+        logger.error(f"Error navigating to X: {e}")
+        return False
+
     editor = None
-    selectors = ["[contenteditable='true']", "[contenteditable=true]", "div[role='textbox']", "textarea"]
+    # X's editor is usually a contenteditable div with specific role
+    selectors = [
+        "[data-testid='tweetTextarea_0']", 
+        "[data-testid='tweetTextarea_0_label']",
+        "div[role='textbox'][contenteditable='true']", 
+        "textarea[placeholder='What is happening?!']",
+        "textarea[placeholder='有什么新鲜事？！']"
+    ]
+    
     for sel in selectors:
         try:
             loc = page.locator(sel).first
-            if loc and loc.count() > 0:
+            if loc and loc.count() > 0 and loc.is_visible():
                 editor = loc
                 break
         except Exception:
             continue
+            
     if editor is None:
-        try:
-            page.goto(X_COMPOSE_URL, wait_until="load", timeout=30000)
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            for sel in selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if loc and loc.count() > 0:
-                        editor = loc
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            pass
-    if editor is None:
+        logger.error("Could not find X editor.")
         return False
+
     try:
-        editor.scroll_into_view_if_needed()
-        editor.click(timeout=4000)
+        editor.click(timeout=3000)
         try:
+            # Clear existing text just in case
             page.keyboard.press("Control+A")
             page.keyboard.press("Delete")
         except Exception:
             pass
-        page.keyboard.type(text, delay=10)
-    except Exception:
-        return False
-    post_btn = None
-    btn_selectors = [
-        "button:has-text('Post'):not([disabled])",
-        "[role='button']:has-text('Post'):not([disabled])",
-        "button:has-text('Tweet'):not([disabled])",
-        "[role='button']:has-text('Tweet'):not([disabled])",
-        "button:has-text('发帖'):not([disabled])",
-        "[role='button']:has-text('发帖'):not([disabled])",
-        "[data-testid='tweetButtonInline']",
-        "[data-testid='tweetButton']"
-    ]
-    for sel in btn_selectors:
+            
+        # Type text
+        # Use fill if possible, otherwise type
         try:
-            loc = page.locator(sel).first
-            if loc and loc.count() > 0:
-                post_btn = loc
-                break
+            editor.fill(text)
         except Exception:
-            continue
-    if post_btn is None:
-        try:
-            page.keyboard.press("Control+Enter")
-            return True
-        except Exception:
-            return False
-    try:
-        post_btn.scroll_into_view_if_needed()
-        for _ in range(20):
+            page.keyboard.type(text, delay=50)
+            
+        page.wait_for_timeout(1000)
+        
+        # Click Post button
+        post_btn = None
+        btn_selectors = [
+            "[data-testid='tweetButton']",
+            "[data-testid='tweetButtonInline']",
+            "button[data-testid='tweetButton']",
+            "div[role='button'][data-testid='tweetButton']"
+        ]
+        
+        for sel in btn_selectors:
             try:
-                dis = post_btn.get_attribute("disabled")
-                if dis is None and post_btn.is_enabled():
+                loc = page.locator(sel).first
+                if loc and loc.count() > 0:
+                    post_btn = loc
                     break
             except Exception:
-                break
-            page.wait_for_timeout(200)
-        post_btn.click(timeout=5000)
-    except Exception:
+                continue
+                
+        if post_btn:
+            # Check enabled
+            for _ in range(10):
+                if not post_btn.is_disabled():
+                    break
+                page.wait_for_timeout(500)
+                
+            post_btn.click(timeout=5000)
+            logger.info("Clicked X post button.")
+            page.wait_for_timeout(3000)
+            
+            # Check for success (optional, hard to detect reliably without specific selectors)
+            # But usually if no error dialog appears, it's fine.
+            return True
+        else:
+            logger.error("Could not find X post button.")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error interacting with X editor: {e}")
         return False
-    try:
-        page.wait_for_timeout(1200)
-    except Exception:
-        pass
-    return True
 
 def open_post_modal(page):
     modal = None
@@ -582,6 +610,21 @@ def sanitize_text(text):
         t = t[:1800]
     return t
 
+def is_virtual_post_text(text):
+    if not text:
+        return True
+    t = str(text)
+    tl = t.lower()
+    if "social heat score" in tl:
+        return True
+    if re.search(r"[A-Z0-9]{2,12}/USDT:USDT", t):
+        return True
+    if "币虎 | 📢 社交热度飙升" in t and "Verified by:" not in t and "Mentions:" not in t:
+        return True
+    if "币虎 | 💰 高额资金费率 |" in t:
+        return True
+    return False
+
 def main():
     ensure_square_queue_schema()
     with sync_playwright() as p:
@@ -589,6 +632,9 @@ def main():
         page = browser.new_page()
         page.goto(PROFILE_URL, wait_until="load")
         last_ad_ts = 0
+        last_creator_pad_ts = 0
+        creator_pad_interval = 300 # Run every 5 minutes (Priority Mode)
+
         while True:
             try:
                 load_dotenv(override=True)
@@ -628,7 +674,10 @@ def main():
                 ok = False
                 reason = None
                 try:
-                    if already_sent(text):
+                    if is_virtual_post_text(text):
+                        mark_failed(pid)
+                        ok, reason = False, "virtual_blocked"
+                    elif already_sent(text):
                         mark_failed(pid)
                         ok, reason = False, "duplicate"
                     else:
@@ -636,7 +685,27 @@ def main():
                         if not clean or len(clean.strip()) == 0:
                             ok, reason = False, "empty"
                         else:
+                            # Post to Binance Square
                             ok = BinanceSquarePublisher()._post_text(page, clean)
+                            
+                            # Post to X if enabled
+                            if ok and Config.X_POST_ENABLED:
+                                try:
+                                    logger.info(f"Posting to X: {clean[:20]}...")
+                                    x_ok = post_to_x(page, clean)
+                                    if x_ok:
+                                        logger.info("Posted to X successfully.")
+                                    else:
+                                        logger.error("Failed to post to X.")
+                                    
+                                    # Return to Binance Square URL
+                                    try:
+                                        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+                                    except Exception:
+                                        pass
+                                except Exception as e:
+                                    logger.error(f"Error posting to X: {e}")
+
                             reason = None if ok else "failed"
                 except Exception:
                     ok = False

@@ -20,6 +20,7 @@ class Config:
     AD_ENABLED = os.getenv("AD_ENABLED", "true").lower() in ("1", "true", "yes")
     FUNDING_SYMBOLS = os.getenv("FUNDING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
     FUNDING_RATE_THRESHOLD = float(os.getenv("FUNDING_RATE_THRESHOLD", "0.0003"))
+    FUNDING_MIN_DAILY_VOLUME_USD = float(os.getenv("FUNDING_MIN_DAILY_VOLUME_USD", "10000000"))
     ALPHA_MONITOR_ENABLED = os.getenv("ALPHA_MONITOR_ENABLED", "true").lower() in ("1", "true", "yes")
     LARGE_TRANSFER_THRESHOLD_USD = float(os.getenv("LARGE_TRANSFER_THRESHOLD_USD", "100000"))
     AUTO_TRADE_ENABLED = os.getenv("AUTO_TRADE_ENABLED", "false").lower() in ("1", "true", "yes")
@@ -46,5 +47,3 @@ class Config:
     DEFAULT_RISK_LEVEL = "medium"
     DEFAULT_TIMEFRAME = "15m"
     
-    # Mock Data for testing if APIs are not available
-    MOCK_MODE = False

@@ -242,8 +242,26 @@ class Database:
             return False
         finally:
             conn.close()
+
+    def _is_virtual_square_post(self, text):
+        if not text:
+            return True
+        t = str(text)
+        tl = t.lower()
+        if "social heat score" in tl:
+            return True
+        if re.search(r"[A-Z0-9]{2,12}/USDT:USDT", t):
+            return True
+        if "币虎 | 📢 社交热度飙升" in t and "Verified by:" not in t and "Mentions:" not in t:
+            return True
+        if "币虎 | 💰 高额资金费率 |" in t:
+            return True
+        return False
     
     def add_square_post(self, text):
+        if self._is_virtual_square_post(text):
+            logger.warning(f"Rejected virtual square post: {str(text)[:120]}")
+            return None
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
@@ -269,6 +287,33 @@ class Database:
         except Exception as e:
             logger.error(f"Error adding square post: {e}")
             return None
+        finally:
+            conn.close()
+
+    def purge_virtual_pending_posts(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE square_queue
+                SET status = 'failed'
+                WHERE status = 'pending'
+                  AND (
+                    lower(text) LIKE '%social heat score%'
+                    OR text LIKE '%/USDT:USDT%'
+                    OR (
+                        text LIKE '%币虎 | 📢 社交热度飙升%'
+                        AND text NOT LIKE '%Verified by:%'
+                        AND text NOT LIKE '%Mentions:%'
+                    )
+                    OR text LIKE '%币虎 | 💰 高额资金费率 |%'
+                  )
+            """)
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception as e:
+            logger.error(f"Error purging virtual posts: {e}")
+            return 0
         finally:
             conn.close()
     

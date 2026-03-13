@@ -1,7 +1,4 @@
-import random
 import logging
-import json
-import os
 import re
 from datetime import datetime
 try:
@@ -20,103 +17,29 @@ logger = logging.getLogger(__name__)
 
 class WhaleWatcher:
     """
-    Mock implementation of a Whale/Smart Money tracker.
-    In a real production environment, this would integrate with:
-    - Cielo Finance API / Webhooks
-    - Debank Open API
-    - Dune Analytics (via API or scraping)
-    - Arkham Intelligence
+    Whale/Smart Money tracker.
     """
     
     def __init__(self):
-        self.sources = [
-            "Cielo Finance",
-            "Drops Bot",
-            "DexCheck",
-            "SpotOnChain",
-            "Arkham Alert"
-        ]
-        self.smart_money_list = self._load_smart_money_list()
-        
-    def _load_smart_money_list(self):
-        """Load smart money list from json file"""
-        try:
-            # Get current directory of this file
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            file_path = os.path.join(current_dir, 'data', 'smart_money_list.json')
-            
-            if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    logger.info(f"Loaded {len(data)} smart money addresses.")
-                    return data
-            return []
-        except Exception as e:
-            logger.error(f"Error loading smart money list: {e}")
-            return []
+        pass
         
     def scan_whale_activity(self, symbol):
-        """
-        Scan for whale activity for a specific symbol.
-        In real mode, parse RSS/快讯来源；否则回退到模拟。
-        """
         base = symbol.upper()
         if '/' in base:
             base = base.split('/')[0]
         if base.endswith('USDT'):
             base = base.replace('USDT', '')
-        if os.getenv("WHALE_REAL_MODE", "false").lower() in ("1", "true", "yes"):
-            data = self._scan_real_sources(base)
-            if data and data.get('has_activity'):
-                return data
-            return {
-                'has_activity': False,
-                'net_flow': 0,
-                'whale_count': 0,
-                'top_source': None,
-                'summary': "暂无显著鲸鱼异动",
-                'sentiment': 'neutral',
-                'details': ""
-            }
-        has_activity = random.random() > 0.3
-        if not has_activity:
-            return {
-                'has_activity': False,
-                'net_flow': 0,
-                'whale_count': 0,
-                'top_source': None,
-                'summary': "暂无显著鲸鱼异动",
-                'sentiment': 'neutral',
-                'details': ""
-            }
-        direction = random.choice(['inflow', 'outflow', 'accumulating'])
-        whale_count = random.randint(1, 5)
-        amount = random.uniform(100000, 5000000)
-        source = random.choice(self.sources)
-        smart_money_name = "Unknown Whale"
-        if self.smart_money_list:
-            sm_entry = random.choice(self.smart_money_list)
-            smart_money_name = sm_entry['name']
-        if direction == 'inflow':
-            summary = f"检测到 {whale_count} 个聪明钱地址净买入"
-            sentiment = "bullish"
-            details = f"🔥 知名聪明钱 [{smart_money_name}] 在 {source} 上被监测到大额买入"
-        elif direction == 'outflow':
-            summary = f"检测到 {whale_count} 个鲸鱼地址抛售"
-            sentiment = "bearish"
-            details = f"⚠️ 知名聪明钱 [{smart_money_name}] 正在抛售"
-        else:
-            summary = f"聪明钱地址持续吸筹中"
-            sentiment = "bullish"
-            details = f"👀 监测到 [{smart_money_name}] 正在持续吸筹"
+        data = self._scan_real_sources(base)
+        if data and data.get('has_activity'):
+            return data
         return {
-            'has_activity': True,
-            'net_flow': amount if direction != 'outflow' else -amount,
-            'whale_count': whale_count,
-            'top_source': source,
-            'summary': summary,
-            'sentiment': sentiment,
-            'details': f"{details} (${amount/1000:.1f}k)"
+            'has_activity': False,
+            'net_flow': 0,
+            'whale_count': 0,
+            'top_source': None,
+            'summary': "暂无显著鲸鱼异动",
+            'sentiment': 'neutral',
+            'details': ""
         }
 
     def _scan_real_sources(self, base):

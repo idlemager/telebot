@@ -10,6 +10,7 @@ from .missions import BinanceMissions
 from .polymarket_watcher import PolymarketWatcher
 import os
 import time
+import asyncio
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,12 @@ class TrendPulseBot:
         self.token = Config.TELEGRAM_BOT_TOKEN
         self.engine = SignalEngine()
         self.db = Database()
+        try:
+            purged = self.db.purge_virtual_pending_posts()
+            if purged > 0:
+                logger.warning(f"Purged {purged} virtual square posts from queue.")
+        except Exception:
+            pass
         self.whale_threshold_usd = Config.WHALE_THRESHOLD_USD
         self.trader = TradingEngine()
         self.onchain = OnChainTradingEngine()
@@ -102,6 +109,21 @@ class TrendPulseBot:
                     'Binance公告': "🏦"
                 }
                 source_emoji = source_emojis.get(article.get('source'), "🗞️")
+                event_info = self.engine.news.analyze_article_event(article)
+                alerts = event_info.get('alerts') or []
+                symbols = event_info.get('symbols') or []
+                bearish_hits = int(event_info.get('bearish_hits') or 0)
+                bullish_hits = int(event_info.get('bullish_hits') or 0)
+                warning_section = ""
+                if bearish_hits > 0:
+                    source_emoji = "🚨"
+                    alert_text = "；".join(alerts[:3]) if alerts else "检测到利空事件"
+                    symbol_text = "、".join(symbols[:6]) if symbols else "未识别"
+                    warning_section = f"\n⚠️ **利空预警**\n• 事件: {alert_text}\n• 涉及币种: {symbol_text}\n"
+                elif bullish_hits > 0:
+                    alert_text = "；".join(alerts[:3]) if alerts else "检测到利好事件"
+                    symbol_text = "、".join(symbols[:6]) if symbols else "未识别"
+                    warning_section = f"\n✅ **利好提示**\n• 事件: {alert_text}\n• 涉及币种: {symbol_text}\n"
                 
                 # AI Analysis Section
                 ai_section = ""
@@ -121,6 +143,7 @@ class TrendPulseBot:
 **{article['title']}**
 
 {article['summary'][:200]}...
+{warning_section}
 {ai_section}
 🔗 [查看原文]({article['link']})
                 """
@@ -358,6 +381,12 @@ class TrendPulseBot:
                         await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
                     except Exception:
                         pass
+                
+                # Also add to Square/X queue
+                # Strip markdown for external platforms
+                plain_msg = f"【Polymarket 预测警报】\n\n事件: {alert['event_title']}\n问题: {alert['question']}\n结果: {alert['outcome']} 概率突升至 {price_pct:.1f}% 🔥\n\n查看: {alert['link']}"
+                self.db.add_square_post(plain_msg)
+                
         except Exception as e:
             logger.error(f"Error in check_polymarket: {e}")
 
@@ -403,44 +432,48 @@ class TrendPulseBot:
     
     async def check_funding_rates(self, context: ContextTypes.DEFAULT_TYPE):
         try:
-            syms = [s.strip() for s in Config.FUNDING_SYMBOLS.split(",") if s.strip()]
-            if not syms:
-                syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             user_ids = self.db.get_all_users()
             if not user_ids:
                 return
-            for s in syms:
-                rate = self.engine.market.fetch_current_funding_rate(s)
+            min_daily_volume = float(getattr(Config, "FUNDING_MIN_DAILY_VOLUME_USD", 10000000))
+            top_n = 5
+            all_symbols = self.engine.market.list_futures_usdt_pairs(limit=2000)
+            if not all_symbols:
+                return
+            funding_rates = self.engine.market.fetch_all_funding_rates()
+            quote_volumes = self.engine.market.fetch_futures_24h_quote_volumes()
+            ranked = []
+            for symbol in all_symbols:
+                rate = funding_rates.get(symbol)
                 if rate is None:
                     continue
-                if abs(rate) < Config.FUNDING_RATE_THRESHOLD:
+                daily_volume = float(quote_volumes.get(symbol) or 0.0)
+                if daily_volume < min_daily_volume:
                     continue
-                pct = rate * 100
-                side = "正" if rate >= 0 else "负"
-                msg = f"""
-⚠️ **资金费率异常**
-━━━━━━━━━━━━━━
-**合约:** {s}
-**费率:** {pct:.4f}%
-**方向:** {side}
-
-💡 *资金费率突破阈值，注意强平与挤兑风险*
-━━━━━━━━━━━━━━
-                """
-                square_msg = f"资金费率异常 {s} | {pct:.4f}%"
-                post_id = self.db.add_square_post(square_msg)
-                for user_id in user_ids:
-                    try:
-                        chat = await context.bot.get_chat(user_id)
-                        if chat.type in ('group', 'supergroup'):
-                            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
-                    except Exception as e:
-                        logger.error(f"Failed to send funding alert to {user_id}: {e}")
-                if post_id is not None:
-                    try:
-                        self.db.mark_square_post_approved(post_id)
-                    except Exception:
-                        pass
+                ranked.append((symbol, float(rate), daily_volume))
+            ranked.sort(key=lambda x: abs(x[1]), reverse=True)
+            ranked = ranked[:top_n]
+            if not ranked:
+                return
+            lines = ["⚠️ **资金费率前五（绝对值排序）**", "━━━━━━━━━━━━━━", ""]
+            for idx, (symbol, rate, daily_volume) in enumerate(ranked, start=1):
+                lines.append(f"{idx}. `{symbol}` | 费率 {rate * 100:+.4f}% | 24h成交额 ${daily_volume:,.0f}")
+            lines.extend(["", "💡 *仅展示成交额达标合约*", "━━━━━━━━━━━━━━"])
+            msg = "\n".join(lines)
+            for user_id in user_ids:
+                try:
+                    chat = await context.bot.get_chat(user_id)
+                    if chat.type in ('group', 'supergroup'):
+                        await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
+                except Exception as e:
+                    logger.error(f"Failed to send funding alert to {user_id}: {e}")
+            square_msg = "资金费率前五 | " + " ; ".join([f"{i+1}.{s}" for i, (s, _, _) in enumerate(ranked)])
+            post_id = self.db.add_square_post(square_msg)
+            if post_id is not None:
+                try:
+                    self.db.mark_square_post_approved(post_id)
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"Error in check_funding_rates: {e}")
     
@@ -744,6 +777,13 @@ class TrendPulseBot:
         sentiment_cn = sentiment_map.get(signal['news_data']['sentiment'], signal['news_data']['sentiment'])
         
         direction_cn = sentiment_map.get(signal['direction'], signal['direction']) 
+        bullish_events = int(signal['news_data'].get('bullish_events') or 0)
+        bearish_events = int(signal['news_data'].get('bearish_events') or 0)
+        alert_items = signal['news_data'].get('alerts') or []
+        event_line = f"• 事件分布: 利好{bullish_events} / 利空{bearish_events}"
+        alert_line = f"• 风险提示: {'；'.join(alert_items[:3])}" if alert_items else "• 风险提示: 暂无"
+        extra_info = signal['news_data'].get('extra_info', '')
+        sentiment_line = f"{sentiment_cn} | {extra_info}" if extra_info else sentiment_cn
 
         # Format Whale Data
         whale_info = ""
@@ -770,7 +810,9 @@ class TrendPulseBot:
 📣 **消息面分析:**
 • 热度指数: {signal['heat_score']}/100
 • 提及增长: +{int(signal['news_data']['mentions_growth'])}%
-• 市场情绪: {sentiment_cn}{signal['news_data'].get('extra_info', '')}
+• 市场情绪: {sentiment_line}
+{event_line}
+{alert_line}
 
 📈 **数据面异动:**
 • 当前价格: `${signal['price']:.4f}`
